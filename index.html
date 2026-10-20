@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LSM-Tree Storage Engine Dashboard</title>
+    <style>
+        body { font-family: Arial, sans-serif; background: #0f172a; color: #f8fafc; display: flex; justify-content: center; padding: 30px 16px; }
+        .card { background: #1e293b; padding: 30px; border-radius: 12px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); width: 400px; max-width: 100%; height: fit-content; }
+        h2 { color: #38bdf8; text-align: center; margin-bottom: 20px; }
+        .group { margin-bottom: 15px; }
+        label { display: block; font-size: 14px; margin-bottom: 5px; color: #94a3b8; }
+        input { width: 100%; padding: 10px; border-radius: 6px; border: 1px solid #475569; background: #0f172a; color: white; box-sizing: border-box; }
+        button { width: 100%; padding: 12px; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; margin-top: 7px; }
+        button:disabled { opacity: .6; cursor: wait; }
+        .btn-put { background: #0284c7; color: white; }
+        .btn-put:hover { background: #0369a1; }
+        .btn-get { background: #10b981; color: white; }
+        .btn-get:hover { background: #059669; }
+        .btn-delete { background: #dc2626; color: white; }
+        .btn-flush { background: #7c3aed; color: white; }
+        .btn-compact { background: #d97706; color: white; }
+        #output { margin-top: 20px; padding: 12px; background: #0f172a; border-left: 4px solid #38bdf8; border-radius: 4px; font-family: monospace; white-space: pre-wrap; overflow-wrap: anywhere; min-height: 40px; }
+        .hint { color: #94a3b8; font-size: 12px; line-height: 1.5; }
+    </style>
+</head>
+<body>
+<div class="card">
+    <h2>LSM-Tree DB UI</h2>
+    <div class="group">
+        <label for="keyInput">Key</label>
+        <input type="text" id="keyInput" placeholder="e.g. user:1">
+    </div>
+    <div class="group">
+        <label for="valueInput">Value</label>
+        <input type="text" id="valueInput" placeholder="e.g. Ayush">
+    </div>
+    <button class="btn-put" id="putButton" onclick="sendPut()">PUT (Insert / Update Data)</button>
+    <button class="btn-get" id="getButton" onclick="sendGet()">GET (Search Data)</button>
+    <button class="btn-delete" id="deleteButton" onclick="sendDelete()">DELETE (Write Tombstone)</button>
+    <button class="btn-flush" id="flushButton" onclick="sendFlush()">FLUSH MemTable to SSTable</button>
+    <button class="btn-compact" id="compactButton" onclick="sendCompact()">COMPACT SSTables</button>
+    <div id="output" role="status" aria-live="polite">Result console ready...</div>
+    <p class="hint">Start the FastAPI server before using this page. Data is stored in the server's ./data folder.</p>
+</div>
+<script>
+    const API = "http://127.0.0.1:8000";
+    const output = document.getElementById("output");
+
+    async function request(url, options = {}) {
+        try {
+            const res = await fetch(url, options);
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+            return data;
+        } catch (error) {
+            output.innerText = `[ERROR] ${error.message}\nCheck that the API is running at ${API}.`;
+            return null;
+        }
+    }
+
+    async function sendPut() {
+        const key = document.getElementById("keyInput").value;
+        const value = document.getElementById("valueInput").value;
+        if (!key) { alert("Enter a key!"); return; }
+        if (!value) { alert("Enter a value! Empty values are currently not accepted by this UI."); return; }
+        const data = await request(`${API}/put`, {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({key, value})
+        });
+        if (data) output.innerText = `[SUCCESS] ${data.message}`;
+    }
+
+    async function sendGet() {
+        const key = document.getElementById("keyInput").value;
+        if (!key) { alert("Enter a key to search!"); return; }
+        const data = await request(`${API}/get/${encodeURIComponent(key)}`);
+        if (!data) return;
+        if (data.status === "found") {
+            output.innerText = `[FOUND] Key: ${data.key} | Value: ${data.value}`;
+        } else {
+            output.innerText = `[NOT FOUND] Key '${data.key}' does not exist.`;
+        }
+    }
+
+    async function sendDelete() {
+        const key = document.getElementById("keyInput").value;
+        if (!key) { alert("Enter a key to delete!"); return; }
+        const data = await request(`${API}/delete/${encodeURIComponent(key)}`, {method: "DELETE"});
+        if (data) output.innerText = `[SUCCESS] ${data.message}`;
+    }
+
+    async function sendFlush() {
+        const data = await request(`${API}/flush`, {method: "POST"});
+        if (data) output.innerText = `[SUCCESS] ${data.message}`;
+    }
+
+    async function sendCompact() {
+        const data = await request(`${API}/compact`, {method: "POST"});
+        if (data) output.innerText = `[SUCCESS] ${data.message}\nSSTables: ${data.tables_before} -> ${data.tables_after}\nKeys written: ${data.keys_written}`;
+    }
+</script>
+</body>
+</html>
