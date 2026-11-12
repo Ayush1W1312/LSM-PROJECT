@@ -1,62 +1,149 @@
-# LSM-Tree Storage Engine (learning project)
+# LSM-Tree Based Key-Value Storage Engine
 
-A small, educational key-value database built around a Skip List MemTable, a Write-Ahead Log (WAL), immutable Sorted String Tables (SSTables), sparse indexes, Bloom filters, and manual compaction.
+A Python-based key-value storage engine built from scratch using the **Log-Structured Merge Tree (LSM-Tree)** architecture. The project explores how modern storage engines manage writes, organize data across memory and disk, recover from failures, and optimize read performance.
 
-## Files
-- `memtable.py` — original Skip List implementation; class/method structure retained.
-- `wal.py` — retains the `WAL` class and `append`, `recover`, `clear`, `close` methods. New records use JSON Lines so keys and values can safely contain colons and newlines; legacy colon-delimited WAL lines are also read where possible.
-- `sstable.py` — sorted JSON Lines records, sparse index (`.index`), Bloom filter (`.bloom`), atomic temporary-file publication, and lookup.
-- `storage_engine.py` — startup recovery, PUT/GET/DELETE, flush, SSTable discovery, and compaction.
-- `main.py` — FastAPI endpoints.
-- `index.html` — browser dashboard, including PUT, GET, DELETE, FLUSH, and COMPACT controls.
-- `test_recovery.py` — disposable-directory regression tests.
-- `benchmark.py` — basic local performance measurement.
+## Overview
 
-## Install and run
-Use Python 3.10+.
+This project implements an LSM-Tree based storage engine that combines an in-memory data structure with persistent disk-based storage.
 
-```bash
-python -m pip install fastapi uvicorn
-python -m uvicorn main:app --reload
-```
+Instead of directly modifying data on disk for every write, the engine first records operations in a Write-Ahead Log (WAL) and maintains data in an in-memory MemTable. Once the MemTable reaches its flush threshold, its contents are written to immutable Sorted String Tables (SSTables).
 
-Open `index.html` in a browser. API docs: http://127.0.0.1:8000/docs.
+To improve lookup performance, the engine incorporates Bloom Filters and Sparse Indexing. It also implements compaction to merge SSTables and maintain an efficient on-disk storage structure.
 
-## API endpoints
-- `POST /put` JSON body: `{"key":"user:1","value":"Ayush"}`
-- `GET /get/{key}` — read a key (the dashboard URL-encodes keys).
-- `DELETE /delete/{key}` — write a delete tombstone.
-- `POST /flush` — force MemTable contents into an SSTable.
-- `POST /compact` — merge all committed SSTables into one.
-- `GET /health` — basic engine status.
+## Architecture
 
-## Data structures and algorithms
-- **Skip List MemTable:** keeps in-memory keys ordered; expected O(log n) search/insert.
-- **WAL:** append and `fsync` before applying writes to the MemTable.
-- **SSTable:** immutable sorted key/value records on disk.
-- **Sparse index:** stores every 100th key by default and its exact byte offset. Lookup binary-searches this index, then scans only a small range.
-- **Bloom filter:** quickly says a key is definitely absent or possibly present. False positives are possible; false negatives should not occur when the filter is valid. Missing/corrupt filters fall back to the index scan.
-- **Compaction:** visits SSTables newest-first; the newest version wins for each key. It writes a new merged SSTable before deleting old files. Tombstones are kept in the compacted output so an interrupted old-file cleanup cannot cause deleted keys to reappear.
+The storage engine follows a write-optimized architecture consisting of the following components:
 
-## Recovery and durability notes
-1. Each PUT/DELETE is appended to the WAL and synced before the MemTable is changed.
-2. SSTable data, sparse index, and Bloom filter are written to temporary files and synced.
-3. The helper files are renamed first; the final `.db` file is published last as the table's commit marker.
-4. The WAL is cleared only after the new SSTable has been published successfully.
-5. Startup discovers table/index pairs and replays any remaining WAL records.
-6. Compaction publishes its merged table before deleting older files. Tombstones are retained to protect against interrupted cleanup.
+### 1. Write-Ahead Log (WAL)
 
-This is a **learning project, not a production database**. It does not use a manifest, checksummed blocks, a lock for multiple processes, or a formal transactional multi-file commit protocol. Filesystem behavior varies, and no claim of guaranteed survival under every hardware/power failure is made. Do not use it for important data. Always test in a disposable directory and back up any existing `data/` directory before migrating file formats.
+The WAL provides durability by recording write operations before they are applied to the in-memory storage structure.
 
-## Tests and benchmark
-```bash
-python test_recovery.py
-python benchmark.py
-```
-The test creates and removes a temporary directory and checks WAL recovery, Unicode/separator-containing keys, sparse-index/Bloom lookup, updates, deletes, compaction, and restart behavior. The benchmark is a simple local comparison aid; its results depend on your machine, Python version, and disk.
+- Records write operations in an append-only log.
+- Uses file synchronization to improve durability.
+- Supports recovery by replaying logged operations after a restart.
+- Helps restore the MemTable following an unexpected shutdown.
 
-## File-format migration
-New SSTables use JSON Lines and companion `.index` and `.bloom` files. Older colon-delimited SSTables from an earlier version are not compatible with this format. Back up and use a fresh data directory for this version unless you implement a migration tool.
+### 2. MemTable (Skip List)
 
-## Reserved value
-`[DELETED]` is used internally as the tombstone marker by the existing MemTable interface, so the engine rejects that exact value in `put`. A future version could replace this with an explicit typed record format to avoid reserving a user value.
+The MemTable stores recently written key-value pairs in memory using a Skip List.
+
+- Maintains keys in sorted order.
+- Supports efficient insertion, deletion, and lookup operations.
+- Provides expected O(log N) search and insertion complexity.
+- Acts as the in-memory buffer before data is flushed to disk.
+
+### 3. SSTable (Sorted String Table)
+
+SSTables provide persistent, immutable storage for sorted key-value records.
+
+- Flushes MemTable data into disk-based SSTable files.
+- Stores records in sorted order.
+- Uses file offsets to locate records efficiently.
+- Supports reading records directly from disk.
+- Maintains a sparse index to accelerate key lookups.
+
+### 4. Bloom Filter
+
+Bloom Filters help reduce unnecessary disk reads during key lookups.
+
+- Uses a probabilistic data structure to test key membership.
+- Quickly identifies keys that are definitely absent.
+- Reduces unnecessary SSTable access.
+- Allows false positives but does not produce false negatives under normal operation.
+
+### 5. Sparse Indexing
+
+Sparse indexing improves the efficiency of searching through SSTables.
+
+- Stores selected keys and their corresponding file offsets.
+- Narrows down the search region within an SSTable.
+- Reduces the amount of disk data that needs to be scanned.
+
+### 6. Compaction
+
+Compaction merges existing SSTables into a consolidated sorted structure.
+
+- Reads and merges records from multiple SSTables.
+- Maintains sorted key-value data.
+- Resolves multiple versions of the same key according to the engine's version-selection rules.
+- Helps control the accumulation of SSTable files.
+
+## Data Flow
+
+### Write Path
+
+1. A write operation is received by the storage engine.
+2. The operation is appended to the Write-Ahead Log.
+3. The data is inserted into the in-memory MemTable.
+4. When the MemTable reaches its configured threshold, its contents are flushed to a new SSTable.
+5. The SSTable and its associated indexing structures are published to disk.
+
+### Read Path
+
+1. A read request is received for a particular key.
+2. The engine checks the in-memory MemTable first.
+3. If the key is not found, the engine searches the available SSTables.
+4. Bloom Filters help eliminate SSTables that definitely do not contain the key.
+5. Sparse indexes help locate the relevant region within an SSTable.
+6. The matching record is retrieved from disk.
+
+### Recovery Path
+
+1. The engine loads its persisted storage metadata.
+2. The WAL is read to identify operations that need recovery.
+3. Valid logged operations are replayed into the MemTable.
+4. The engine restores its in-memory state and becomes ready to process requests.
+
+## Technology Stack
+
+| Component | Technology |
+|---|---|
+| Programming Language | Python |
+| Storage Architecture | LSM-Tree |
+| In-Memory Data Structure | Skip List |
+| Persistent Storage | SSTables |
+| Durability | Write-Ahead Logging |
+| Read Optimization | Bloom Filters |
+| Disk Lookup Optimization | Sparse Indexing |
+
+## Project Structure
+
+The implementation is organized into separate modules for storage management and individual LSM-Tree components.
+
+| Module | Responsibility |
+|---|---|
+| `wal.py` | Write-Ahead Logging and recovery |
+| `memtable.py` | Skip List-based in-memory storage |
+| SSTable modules | Writing and reading immutable disk tables |
+| Storage engine module | Coordinates writes, reads, flushing, recovery, and compaction |
+
+*Refer to the source files for the exact module names and implementation details.*
+
+## Key Engineering Concepts
+
+This project explores several important database-engineering concepts:
+
+- Write-optimized storage architectures.
+- In-memory indexing using Skip Lists.
+- Append-only logging and crash recovery.
+- Immutable disk-based storage structures.
+- Probabilistic data structures.
+- File offsets and disk-level record access.
+- Sparse indexing and lookup optimization.
+- SSTable merging and compaction.
+
+## Future Improvements
+
+- Range queries and efficient sequential scans.
+- Background compaction.
+- Multi-level SSTable organization.
+- Concurrent read and write support.
+- Benchmarking against alternative storage structures.
+- Improved crash consistency and fault-injection testing.
+
+## Author
+
+**Ayush Gusain**
+
+- GitHub: [Ayush1W1312](https://github.com/Ayush1W1312)
+- LinkedIn: [Ayush Gusain](https://linkedin.com/in/ayush-gusain-090bb632a)
